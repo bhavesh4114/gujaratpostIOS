@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import '../models/article.dart';
 import '../services/news_service.dart';
 import 'article_detail_screen.dart';
+import 'shorts_feed_screen.dart';
+
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -83,6 +85,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   void _onCategorySelected(int index) {
+    // Videos tab (index 1 / slug 'videos') → open ShortsFeedScreen directly.
+    // No intermediate list screen is shown.
+    if (_categories[index].slug == 'videos') {
+      _openVideosFeed();
+      return;
+    }
     if (_selectedCategoryIndex == index) return;
     setState(() {
       _selectedCategoryIndex = index;
@@ -90,7 +98,45 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _refreshFeed();
   }
 
+  /// Fetch video articles (or reuse what we have) then push the Shorts player.
+  Future<void> _openVideosFeed({Article? startAt}) async {
+    // Show a brief loading indicator while fetching
+    List<Article> videoList = _allArticles
+        .where((a) => _youtubeId(a.videoUrl) != null)
+        .toList();
+
+    if (videoList.isEmpty) {
+      // Fetch from network if we don't have any yet
+      final fetched = await NewsService.fetchArticles(categorySlug: 'videos');
+      if (mounted) {
+        videoList = fetched.where((a) => _youtubeId(a.videoUrl) != null).toList();
+      }
+    }
+
+    if (!mounted) return;
+
+    final idx = startAt == null
+        ? 0
+        : videoList.indexWhere((a) => a.id == startAt.id);
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ShortsFeedScreen(
+          videos: videoList,
+          initialIndex: idx >= 0 ? idx : 0,
+        ),
+      ),
+    );
+  }
+
   void _openArticleDetail(Article article) {
+    // If the article has a YouTube videoUrl → open ShortsFeedScreen directly.
+    final videoId = _youtubeId(article.videoUrl);
+    if (videoId != null) {
+      _openVideosFeed(startAt: article);
+      return;
+    }
+    // Normal article → article detail screen.
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => ArticleDetailScreen(
@@ -101,15 +147,33 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
+  String? _youtubeId(String? value) {
+    if (value == null || value.trim().isEmpty) return null;
+    final uri = Uri.tryParse(value.trim());
+    if (uri == null) return null;
+    final host = uri.host.toLowerCase();
+    if (host == 'youtu.be' || host == 'www.youtu.be') {
+      return uri.pathSegments.isEmpty ? null : uri.pathSegments.first;
+    }
+    if (host == 'youtube.com' || host == 'www.youtube.com' || host == 'm.youtube.com') {
+      if (uri.path == '/watch') return uri.queryParameters['v'];
+      if (uri.pathSegments.length >= 2 &&
+          {'shorts', 'embed', 'live'}.contains(uri.pathSegments.first)) {
+        return uri.pathSegments[1];
+      }
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final bgColor = _isDarkMode ? const Color(0xFF0F1015) : Colors.white;
     final surfaceColor = _isDarkMode ? const Color(0xFF18181B) : Colors.white;
     final textPrimary = _isDarkMode ? const Color(0xFFF1F5F9) : Colors.black;
     final textSecondary =
-        _isDarkMode ? const Color(0xFF94A3B8) : const Color(0xFF808080);
+        _isDarkMode ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
     final dividerColor =
-        _isDarkMode ? const Color(0xFF27272A) : const Color(0xFFEEEEEE);
+        _isDarkMode ? const Color(0xFF27272A) : const Color(0xFFE5E7EB);
 
     final isHomeFeed = _categories[_selectedCategoryIndex].slug == 'all';
 
@@ -122,8 +186,22 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         systemNavigationBarIconBrightness:
             _isDarkMode ? Brightness.light : Brightness.dark,
       ),
-      child: Scaffold(
-        key: _scaffoldKey,
+      child: PopScope(
+        canPop: _selectedCategoryIndex == 0 && !_isSearchOpen,
+        onPopInvokedWithResult: (didPop, result) {
+          if (didPop) return;
+          if (_isSearchOpen) {
+            setState(() {
+              _isSearchOpen = false;
+              _searchController.clear();
+            });
+            _refreshFeed();
+          } else if (_selectedCategoryIndex != 0) {
+            _onCategorySelected(0);
+          }
+        },
+        child: Scaffold(
+          key: _scaffoldKey,
         backgroundColor: bgColor,
         drawer: _buildNavigationDrawer(),
         appBar: PreferredSize(
@@ -165,10 +243,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                         physics: const AlwaysScrollableScrollPhysics(),
                         padding: const EdgeInsets.only(bottom: 24),
                         children: [
-                          // Category header when viewing a specific category (e.g. Gujarat, Videos)
-                          if (!isHomeFeed)
-                            _buildCategoryViewHeader(textPrimary),
-
                           // If Home Feed: Render all categorized sections (Latest News, Gujarat, National, etc.)
                           if (isHomeFeed) ...[
                             ..._homeGroups.map(
@@ -179,18 +253,21 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                                 dividerColor,
                               ),
                             ),
+                            // Photo Gallery Section at the bottom of Home Feed
+                            _buildPhotoGallerySection(textPrimary, textSecondary),
                           ] else ...[
                             // Specific Category Feed with Hero + Articles
+                            // (Videos tab never reaches here — it pushes ShortsFeedScreen)
                             if (_allArticles.isNotEmpty)
                               _buildHeroCard(_allArticles.first, textSecondary),
                             ..._allArticles.skip(1).map(
-                                  (article) => _buildArticleRow(
-                                    article,
-                                    textPrimary,
-                                    textSecondary,
-                                    dividerColor,
-                                  ),
-                                ),
+                              (article) => _buildArticleRow(
+                                article,
+                                textPrimary,
+                                textSecondary,
+                                dividerColor,
+                              ),
+                            ),
                           ],
                         ],
                       ),
@@ -199,8 +276,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
   // --- Normal Top Bar (Matching Android MaterialToolbar) ---
   Widget _buildNormalHeader(Color surfaceColor, Color textPrimary) {
@@ -424,32 +502,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
 
-  // --- Header when viewing a specific Category (e.g. Gujarat, National) ---
-  Widget _buildCategoryViewHeader(Color textPrimary) {
-    final catName = _categories[_selectedCategoryIndex].name;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Row(
-        children: [
-          IconButton(
-            icon: Icon(Icons.arrow_back, color: textPrimary),
-            onPressed: () {
-              _onCategorySelected(0); // return to Home
-            },
-          ),
-          const SizedBox(width: 4),
-          Text(
-            catName,
-            style: TextStyle(
-              fontSize: 19,
-              fontWeight: FontWeight.bold,
-              color: textPrimary,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   // --- Categorized Section Group (Matching Android item_home_category_section.xml) ---
   Widget _buildCategoryGroupSection(
@@ -464,31 +516,55 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
 
-        // Section Title Bar: "Title" + "View all ▸"
+        // Section Title Bar: Vertical Indicator Bar + "Latest News" + "View all →"
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              InkWell(
-                onTap: () {
-                  final catIdx = _categories
-                      .indexWhere((c) => c.slug == group.slug);
-                  if (catIdx >= 0) _onCategorySelected(catIdx);
-                },
-                child: Text(
-                  group.title,
-                  style: TextStyle(
-                    fontSize: 19,
-                    fontWeight: FontWeight.bold,
-                    color: textPrimary,
-                    letterSpacing: -0.2,
+              Expanded(
+                child: InkWell(
+                  onTap: () {
+                    final catIdx = _categories
+                        .indexWhere((c) => c.slug == group.slug);
+                    if (catIdx >= 0) _onCategorySelected(catIdx);
+                  },
+                  borderRadius: BorderRadius.circular(4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      // Thick vertical indicator bar matching Screenshot 1
+                      Container(
+                        width: 4,
+                        height: 20,
+                        decoration: BoxDecoration(
+                          color: textPrimary,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          group.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 19,
+                            fontWeight: FontWeight.w800,
+                            color: textPrimary,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
+              const SizedBox(width: 12),
               InkWell(
                 onTap: () {
                   final catIdx = _categories
@@ -500,20 +576,26 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                 borderRadius: BorderRadius.circular(4),
                 child: Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                      const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       Text(
                         'View all',
                         style: TextStyle(
-                          fontSize: 16,
+                          fontSize: 15,
                           fontWeight: FontWeight.bold,
                           color: textPrimary,
+                          letterSpacing: -0.1,
                         ),
                       ),
-                      const SizedBox(width: 2),
-                      Icon(Icons.arrow_right, size: 20, color: textPrimary),
+                      const SizedBox(width: 4),
+                      Icon(
+                        Icons.arrow_forward,
+                        size: 16,
+                        color: textPrimary,
+                      ),
                     ],
                   ),
                 ),
@@ -522,14 +604,24 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           ),
         ),
 
-        // If Carousel (National / Entertainment as per Android HomeCategoryGroupAdapter)
+        // If Carousel (National / Entertainment): Dedicated white-card carousel matching Reference Image
         if (group.isCarousel)
-          _buildCarouselSection(group, textSecondary)
-        else ...[
-          // Standard Vertical: Featured Hero Card + Sub articles
+          _buildHorizontalCardCarousel(group, textPrimary, textSecondary)
+        else if (group.isListOnly) ...[
+          // Clean List-Only Mode for Fact Check & Technology (No large banner card, clean list only)
+          ...articles.take(6).map(
+                (article) => _buildArticleRow(
+                  article,
+                  textPrimary,
+                  textSecondary,
+                  dividerColor,
+                ),
+              ),
+        ] else ...[
+          // Standard Vertical: Featured Hero Card + 5 Sub articles (1 main + 5 below)
           _buildHeroCard(articles.first, textSecondary),
           const SizedBox(height: 4),
-          ...articles.skip(1).take(3).map(
+          ...articles.skip(1).take(5).map(
                 (article) => _buildArticleRow(
                   article,
                   textPrimary,
@@ -540,6 +632,404 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         ],
 
         const SizedBox(height: 8),
+      ],
+    );
+  }
+
+  // --- Horizontal Card Carousel (Matching Reference Image: Aligned 16px start padding, tight 8px gap, side card peeking) ---
+  Widget _buildHorizontalCardCarousel(
+    CategorySectionGroup group,
+    Color textPrimary,
+    Color textSecondary,
+  ) {
+    final articles = group.articles.take(6).toList();
+    final isDark = _isDarkMode;
+    final cardBg = isDark ? const Color(0xFF1E293B) : Colors.white;
+    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0);
+    final screenWidth = MediaQuery.of(context).size.width;
+    final cardWidth = (screenWidth * 0.78).clamp(270.0, 310.0);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 2),
+        SizedBox(
+          height: 242,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            itemCount: articles.length,
+            separatorBuilder: (context, index) => const SizedBox(width: 8),
+            itemBuilder: (context, idx) {
+              final item = articles[idx];
+              return Container(
+                width: cardWidth,
+                decoration: BoxDecoration(
+                  color: cardBg,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: borderColor,
+                    width: 1,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.06),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: () => _openArticleDetail(item),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // 1. News Image at Top (Cover fit, 138px height)
+                          SizedBox(
+                            height: 138,
+                            width: double.infinity,
+                            child: Image.network(
+                              item.displayImageUrl,
+                              fit: BoxFit.cover,
+                              headers: const {
+                                'User-Agent':
+                                    'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                              },
+                              errorBuilder: (context, error, stackTrace) =>
+                                  _buildImagePlaceholder(),
+                            ),
+                          ),
+
+                          // 2. Headline & Date / Read Time metadata
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  // Headline (2 lines max, ellipsis)
+                                  Text(
+                                    item.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 14.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: textPrimary,
+                                      height: 1.35,
+                                      letterSpacing: -0.1,
+                                      fontFamily: 'NotoSansGujarati',
+                                    ),
+                                  ),
+
+                                  // Date and Read Time (e.g. "19 Oct 2026 | 1 min read time")
+                                  Text(
+                                    '${_formatArticleDate(item)} | ${_calcReadTime(item)}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 12.0,
+                                      fontWeight: FontWeight.w400,
+                                      color: Color(0xFF94A3B8),
+                                      letterSpacing: -0.1,
+                                      fontFamily: 'NotoSansGujarati',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatArticleDate(Article article) {
+    if (article.publishedAt != null) {
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      ];
+      final dt = article.publishedAt!;
+      return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    }
+    if (article.timeAgo.contains('day')) {
+      final days = int.tryParse(article.timeAgo.replaceAll(RegExp(r'[^0-9]'), '')) ?? 1;
+      final dt = DateTime.now().subtract(Duration(days: days));
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      ];
+      return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    } else if (article.timeAgo.contains('hour') ||
+        article.timeAgo.contains('minute') ||
+        article.timeAgo.contains('now')) {
+      final dt = DateTime.now();
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      ];
+      return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    }
+    return article.timeAgo;
+  }
+
+  String _calcReadTime(Article article) {
+    final text = '${article.title} ${article.excerpt ?? ''} ${article.content ?? ''}'.trim();
+    final words = text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+    final mins = (words / 150).ceil();
+    final readMins = mins < 1 ? 1 : mins;
+    return '$readMins min read time';
+  }
+
+  // --- Photo Gallery Section (Matching Reference Image: Red "ફોટો ગેલેરી" Pill, Dark Horizontal Line, "વધુ ફોટો ગેલેરી →", Full-Bleed Portrait Cards with Red "સમાચાર" Pill) ---
+  Widget _buildPhotoGallerySection(
+    Color textPrimary,
+    Color textSecondary,
+  ) {
+    // Select Photo Gallery articles
+    List<Article> galleryArticles = _allArticles.where((a) {
+      final cat = (a.categorySlug ?? a.category ?? '').toLowerCase();
+      final title = a.title.toLowerCase();
+      return cat.contains('gallery') ||
+          cat.contains('photo') ||
+          title.contains('ફોટો') ||
+          title.contains('ગેલેરી');
+    }).toList();
+
+    if (galleryArticles.isEmpty) {
+      galleryArticles = _allArticles.skip(2).take(6).toList();
+    }
+
+    final isDark = _isDarkMode;
+    final dividerLineColor = isDark ? const Color(0xFF334155) : const Color(0xFF1E293B);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 16),
+
+        // Header: Red "ફોટો ગેલેરી" Pill + "વધુ ફોટો ગેલેરી →"
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              // Red "ફોટો ગેલેરી" Pill Badge with subtle glow
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFFB3121B), Color(0xFF8E0E15)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(6),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFFB3121B).withValues(alpha: 0.35),
+                      blurRadius: 8,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: const Text(
+                  'ફોટો ગેલેરી',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15.0,
+                    fontWeight: FontWeight.bold,
+                    fontFamily: 'NotoSansGujarati',
+                    letterSpacing: -0.2,
+                  ),
+                ),
+              ),
+
+              // "વધુ ફોટો ગેલેરી →" Link
+              InkWell(
+                onTap: () {
+                  final catIdx = _categories.indexWhere(
+                    (c) => c.slug.contains('gallery') || c.slug == 'entertainment',
+                  );
+                  if (catIdx >= 0) {
+                    _onCategorySelected(catIdx);
+                  }
+                },
+                borderRadius: BorderRadius.circular(4),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'વધુ ફોટો ગેલેરી',
+                        style: TextStyle(
+                          fontSize: 14.0,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFFB3121B),
+                          fontFamily: 'NotoSansGujarati',
+                        ),
+                      ),
+                      SizedBox(width: 4),
+                      Icon(
+                        Icons.arrow_forward,
+                        size: 15,
+                        color: Color(0xFFB3121B),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Horizontal Accent Line Running Underneath the Badge across the full width
+        Container(
+          margin: const EdgeInsets.only(top: 6, bottom: 12),
+          height: 1.5,
+          color: dividerLineColor,
+        ),
+
+        // Horizontal Carousel of Photo Cards
+        SizedBox(
+          height: 250,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            itemCount: galleryArticles.length,
+            separatorBuilder: (context, index) => const SizedBox(width: 10),
+            itemBuilder: (context, idx) {
+              final item = galleryArticles[idx];
+              const badgeLabel = 'સમાચાર';
+
+              return Container(
+                width: 240,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.12),
+                      blurRadius: 8,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(14),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: () => _openArticleDetail(item),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          // Background Image
+                          Image.network(
+                            item.displayImageUrl,
+                            fit: BoxFit.cover,
+                            headers: const {
+                              'User-Agent':
+                                  'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                            },
+                            errorBuilder: (context, error, stackTrace) =>
+                                _buildImagePlaceholder(),
+                          ),
+
+                          // Bottom Dark Gradient Overlay
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Colors.transparent,
+                                  Colors.black.withValues(alpha: 0.1),
+                                  Colors.black.withValues(alpha: 0.65),
+                                  Colors.black.withValues(alpha: 0.92),
+                                ],
+                                stops: const [0.35, 0.55, 0.75, 1.0],
+                              ),
+                            ),
+                          ),
+
+                          // Top-Left Category Badge ("સમાચાર")
+                          Positioned(
+                            top: 10,
+                            left: 10,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFDC2626),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                badgeLabel,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700,
+                                  fontFamily: 'NotoSansGujarati',
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          // Bottom Headline Title
+                          Positioned(
+                            left: 12,
+                            right: 12,
+                            bottom: 12,
+                            child: Text(
+                              item.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14.0,
+                                fontWeight: FontWeight.w700,
+                                height: 1.35,
+                                fontFamily: 'NotoSansGujarati',
+                                shadows: [
+                                  Shadow(
+                                    color: Colors.black87,
+                                    blurRadius: 4,
+                                    offset: Offset(0, 1),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+
+        const SizedBox(height: 16),
       ],
     );
   }
@@ -627,14 +1117,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             children: [
               // Cover Image
               Positioned.fill(
-                child: article.imageUrl != null && article.imageUrl!.isNotEmpty
-                    ? Image.network(
-                        article.imageUrl!,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) =>
-                            _buildImagePlaceholder(),
-                      )
-                    : _buildImagePlaceholder(),
+                child: Image.network(
+                  article.displayImageUrl,
+                  fit: BoxFit.cover,
+                  headers: const {
+                    'User-Agent':
+                        'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                  },
+                  errorBuilder: (context, error, stackTrace) =>
+                      _buildImagePlaceholder(),
+                ),
               ),
 
               // Bottom Gradient Overlay
@@ -657,9 +1149,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
               // Overlaid Title & Date
               Positioned(
-                left: 12,
-                right: 12,
-                bottom: 10,
+                left: 14,
+                right: 14,
+                bottom: 12,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
@@ -670,17 +1162,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 16.5,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w500,
                         height: 1.28,
+                        letterSpacing: 0.0,
                       ),
                     ),
-                    const SizedBox(height: 5),
+                    const SizedBox(height: 6),
                     Text(
                       article.timeAgo,
                       style: const TextStyle(
-                        color: Color(0xFFD1D5DB),
-                        fontSize: 12.5,
+                        color: Color(0xFFCCCCCC),
+                        fontSize: 12.0,
+                        fontWeight: FontWeight.w400,
                       ),
                     ),
                   ],
@@ -705,26 +1199,41 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 16:10 Thumbnail with 8dp rounded corner
+                // 16:10 Thumbnail with clean rounded corners
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(6),
                   child: Container(
-                    width: 118,
+                    width: 114,
                     height: 76,
                     color: const Color(0xFFF1F5F9),
-                    child: article.imageUrl != null &&
-                            article.imageUrl!.isNotEmpty
-                        ? Image.network(
-                            article.imageUrl!,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) =>
-                                _buildImagePlaceholder(isSmall: true),
-                          )
-                        : _buildImagePlaceholder(isSmall: true),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.network(
+                          article.displayImageUrl,
+                          fit: BoxFit.cover,
+                          headers: const {
+                            'User-Agent':
+                                'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                          },
+                          errorBuilder: (context, error, stackTrace) =>
+                              _buildImagePlaceholder(isSmall: true),
+                        ),
+                        if (_categories[_selectedCategoryIndex].slug == 'videos')
+                          const Center(
+                            child: Icon(
+                              Icons.play_circle_fill,
+                              color: Colors.white,
+                              size: 34,
+                              shadows: [Shadow(color: Colors.black54, blurRadius: 5)],
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
 
@@ -734,6 +1243,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.start,
                     children: [
                       Text(
                         article.title,
@@ -741,17 +1251,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          height: 1.26,
+                          fontSize: 14.0,
+                          fontWeight: FontWeight.w500,
+                          height: 1.32,
+                          letterSpacing: 0.0,
                         ),
                       ),
-                      const SizedBox(height: 5),
+                      const SizedBox(height: 6),
                       Text(
                         article.timeAgo,
                         style: TextStyle(
                           color: textSecondary,
-                          fontSize: 12,
+                          fontSize: 12.0,
+                          fontWeight: FontWeight.w400,
                         ),
                       ),
                     ],
@@ -762,7 +1274,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Divider(height: 1, thickness: 0.6, color: dividerColor),
+            child: Divider(height: 1, thickness: 0.8, color: dividerColor),
           ),
         ],
       ),
@@ -771,12 +1283,26 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   Widget _buildImagePlaceholder({bool isSmall = false}) {
     return Container(
-      color: const Color(0xFF2A2E39),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF242B38), Color(0xFF131822)],
+        ),
+      ),
       alignment: Alignment.center,
-      child: Icon(
-        Icons.newspaper,
-        size: isSmall ? 28 : 42,
-        color: Colors.white24,
+      child: Opacity(
+        opacity: 0.45,
+        child: Image.asset(
+          'assets/images/gujarat_post_logo.png',
+          width: isSmall ? 52 : 90,
+          fit: BoxFit.contain,
+          errorBuilder: (context, error, stackTrace) => Icon(
+            Icons.newspaper,
+            size: isSmall ? 28 : 42,
+            color: Colors.white24,
+          ),
+        ),
       ),
     );
   }
